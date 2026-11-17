@@ -160,6 +160,26 @@ check('carries the root back', samePath(status.root, REPO))
 check('freshness is a known word', ['synced', 'stale', 'syncing', 'unknown'].includes(status.freshness), status.freshness)
 check('came from the live cache', status.source === 'cache', status.source)
 
+console.log('\n--- a wedged `syncing` flag ---')
+// graft's `syncing` flag has exactly ONE clearer: graft's own sync-run. A rebuild
+// killed mid-flight never runs its `finally`, and graft's query-time refresh rebuilds
+// the graph WITHOUT touching stats.json, so the flag can outlive the sync by hours
+// and the chip reads "syncing" forever. Every sync in flight holds graft's lock, and
+// both writers take it before setting the flag, so a flag with no lock is a leftover:
+// report the drift instead of lying.
+await writeFile(
+  join(REPO, 'graft', '.cache', 'stats.json'),
+  JSON.stringify({ nodeCount: 391, edgeCount: 179, dirty: true, syncing: true, staleCount: 1 }),
+)
+check('a flag with no lock reads as stale, not syncing', (await computeStatus(REPO, io)).freshness === 'stale')
+await writeFile(join(REPO, 'graft', '.cache', '.sync.lock'), JSON.stringify({ pid: process.pid, at: Date.now() }))
+check('a flag with the lock held still reads as syncing', (await computeStatus(REPO, io)).freshness === 'syncing')
+await rm(join(REPO, 'graft', '.cache', '.sync.lock'), { force: true })
+await writeFile(
+  join(REPO, 'graft', '.cache', 'stats.json'),
+  JSON.stringify({ nodeCount: 1284, edgeCount: 5312, dirty: false, staleCount: 0, syncedAt: '2026-09-11T09:00:00.000Z' }),
+)
+
 console.log('\n--- the graph fallback ---')
 // stats.json absent: must fall back to the wiring graph rather than report
 // "no graph", which is the bug graft's own statusline documents.

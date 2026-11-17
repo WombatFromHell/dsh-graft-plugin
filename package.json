@@ -1,6 +1,6 @@
 {
   "name": "dsh-graft-plugin",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Shows which graft index a dsh session is serving and whether it still matches the code, and gives the model graft_ask, graft_grep, graft_callers, graft_skeleton and graft_map as native tools.",
   "icon": "assets/icon.png",
   "type": "module",
@@ -38,7 +38,8 @@
   "scripts": {
     "test": "node scripts/test-harness.mjs && node scripts/test-autosync.mjs && node scripts/test-ensure.mjs && node scripts/test-command.mjs && node scripts/test-guidance.mjs",
     "test:live": "node scripts/test-tools.mjs",
-    "postinstall": "node scripts/postinstall.mjs"
+    "postinstall": "node scripts/postinstall.mjs",
+    "verify:wedge": "node scripts/verify-wedge.mjs"
   },
   "dsh": {
     "bundle": {

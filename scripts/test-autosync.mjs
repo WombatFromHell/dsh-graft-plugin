@@ -88,6 +88,29 @@ check('a forced rebuild skips the clean gate', (await sync.rebuild('C:/y')) === 
 check('and it spawned graft\'s sync-run for that root', spawned.some((a) => a[1][1] === 'C:/y'), JSON.stringify(spawned.at(-1)))
 check('it set syncing so the chip can show it', state.stats.syncing === true)
 
+console.log('\n--- a rebuild whose spawn fails must not wedge `syncing` ---')
+// Nothing else clears graft's `syncing` flag. A spawn that never lands a process
+// leaves the chip saying "syncing" forever, and the lock left behind defers every
+// later rebuild for graft's whole stale-lock window.
+state.stats = { dirty: true }
+state.lock = true
+state.released = 0
+// The fake models lock AVAILABILITY, the same way acquireLock reads it above:
+// true = free to take, false = held by another builder.
+state.releaseLock = () => { state.lock = true; state.released += 1 }
+now += 60_000
+const deadSpawn = make({ spawn: () => { throw new Error('ENOENT') } })
+check('the failure is reported', (await deadSpawn.rebuild('C:/z')) === 'spawn-failed')
+check('the flag is cleared', state.stats.syncing === false)
+check('and the lock is released', state.released === 1)
+
+// A failed spawn reports itself asynchronously, through an 'error' event.
+const emitter = { handlers: {}, on(ev, fn) { this.handlers[ev] = fn }, unref() {} }
+const lateSpawn = make({ spawn: () => emitter })
+check('a spawn that only fails later still starts', (await lateSpawn.rebuild('C:/w')) === 'started')
+emitter.handlers.error?.(new Error('ENOENT'))
+check('and that late error clears the flag too', state.stats.syncing === false && state.released === 2)
+
 console.log('\n--- mid-turn rebuild: a long turn must not sit on a stale graph ---')
 // The turn boundary alone left a graph dirty for 36 minutes of one agentic
 // turn while the model kept querying it. A write now also arms a debounce.
@@ -186,18 +209,70 @@ check('nothing installed falls back to the bare command', bare.command === 'graf
 // which is what Build and every query tool returned there. The npm shim's own
 // rule — the node beside the shims — is the interpreter to use instead.
 const NODE_EXE = process.platform === 'win32' ? 'node.exe' : 'node'
-const npmDir = join('C:\\Users\\x', 'AppData', 'Local', 'hermes', 'node')
+// A PATH entry must be shaped for the host running the suite: POSIX splits PATH on
+// ':', so a Windows fixture like `C:\npm` arrives as `C` + `\npm` and the scan finds
+// nothing — the assertion then fails on the very behaviour it is meant to prove.
+const envDir = (...seg) => join(process.platform === 'win32' ? 'C:\\' : '/', ...seg)
+const npmDir = envDir('Users', 'x', 'AppData', 'Local', 'hermes', 'node')
 const npmCli = join(npmDir, 'node_modules', '@nanonets', 'graft', 'dist', 'cli.js')
 const appExe = join('C:\\Application', 'DeepSeek Harness', 'DeepSeek Harness.exe')
 const onElectron = resolveGraftCommand({ PATH: npmDir }, fakeExists(new Set([npmCli, join(npmDir, NODE_EXE)])), appExe, true)
 check('an Electron host runs graft with the node beside it, not the app binary', onElectron.command === join(npmDir, NODE_EXE) && onElectron.shell === false, onElectron.command)
 // A graft whose prefix has no node of its own (bun, a hand-made layout): the
 // PATH search is the fallback, so the Electron binary is still not used.
-const elsewhere = join('C:\\Program Files', 'nodejs')
+const elsewhere = envDir('Program Files', 'nodejs')
 const viaPath = resolveGraftCommand({ PATH: [npmDir, elsewhere].join(delimiter) }, fakeExists(new Set([npmCli, join(elsewhere, NODE_EXE)])), appExe, true)
 check('a node elsewhere on PATH is preferred over the app binary', viaPath.command === join(elsewhere, NODE_EXE), viaPath.command)
 const noNode = resolveGraftCommand({ PATH: npmDir }, fakeExists(new Set([npmCli])), appExe, true)
 check('with no node anywhere it still returns the cli, not nothing', noNode.prefix[0] === npmCli && noNode.command === appExe, noNode.command)
+// A symlinked graft install — Bazzite ships /home as a symlink to /var/home, so the
+// managed prefix IS a symlinked path. Node resolves a module through symlinks to its
+// realpath, so graft's entry guard
+//
+//     import.meta.url === pathToFileURL(process.argv[1]).href
+//
+// is false when sync-run is spawned by the symlinked path: the child imports the
+// module, runs nothing, exits 0, and leaves `syncing: true` set forever. That is the
+// stuck chip. The fixture mirrors graft's guard exactly.
+{
+  const { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, existsSync } = await import('node:fs')
+  const { spawn: realSpawn } = await import('node:child_process')
+  const scratchDir = join(process.cwd(), '.play')
+  mkdirSync(scratchDir, { recursive: true })
+  const scratch = mkdtempSync(join(scratchDir, 'symlinked-'))
+  const real = join(scratch, 'real')
+  mkdirSync(join(real, 'dist', 'claude'), { recursive: true })
+  writeFileSync(join(real, 'dist', 'cli.js'), '')
+  writeFileSync(join(real, 'dist', 'claude', 'state.js'),
+    'export function readStats() { return { dirty: true } }\n'
+    + 'export function patchStats() {}\n'
+    + 'export function acquireLock() { return true }\n')
+  writeFileSync(join(real, 'dist', 'claude', 'sync-run.js'),
+    'import { pathToFileURL } from "node:url"\n'
+    + 'import { writeFileSync } from "node:fs"\n'
+    + 'if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)\n'
+    + '  writeFileSync(process.argv[2], "built")\n')
+  const link = join(scratch, 'link')
+  symlinkSync(real, link)
+  const marker = join(scratch, 'built-marker')
+  let closed
+  const symlinked = createAutoSync({
+    cliPath: join(link, 'dist', 'cli.js'),
+    nodePath: process.execPath,
+    now: () => 5_000_000,
+    spawn: (c, a, o) => {
+      const child = realSpawn(c, a, o)
+      child.on('close', (code) => { closed = code })
+      return child
+    },
+  })
+  check('a symlinked graft install starts a rebuild', (await symlinked.rebuild(marker)) === 'started')
+  const deadline = Date.now() + 5_000
+  while (!existsSync(marker) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+  check('the symlinked sync-run actually runs its build', existsSync(marker), `child exit ${closed}`)
+  rmSync(scratch, { recursive: true, force: true })
+}
+
 // A plain Node host is untouched by all of this: its execPath IS the runtime.
 const onNode = resolveGraftCommand({ PATH: npmDir }, fakeExists(new Set([npmCli])), join('C:\\node', 'node.exe'), false)
 check('a Node host keeps using its own process.execPath', onNode.command === join('C:\\node', 'node.exe'), onNode.command)

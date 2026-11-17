@@ -38,7 +38,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -77,7 +77,12 @@ async function loadGraftState(cliPath) {
   if (typeof cliPath !== 'string' || cliPath === '') return undefined
   const claudeDir = join(dirname(cliPath), 'claude')
   const statePath = join(claudeDir, 'state.js')
-  const syncRun = join(claudeDir, 'sync-run.js')
+  // Spawned as an ENTRY file, so it must be the realpath: Node resolves a module
+  // through a symlink to its realpath, and graft's guard
+  // `import.meta.url === pathToFileURL(process.argv[1]).href` is then false for a
+  // symlinked path (Bazzite's /home -> /var/home). The child imports the module, runs
+  // nothing, exits 0, and leaves `syncing: true` set — the stuck chip.
+  const syncRun = realpathSync(join(claudeDir, 'sync-run.js'))
   if (!existsSync(statePath) || !existsSync(syncRun)) return undefined
   try {
     const state = await import(pathToFileURL(statePath).href)
@@ -169,6 +174,23 @@ export function createAutoSync(deps = {}) {
       if (loaded === undefined) loaded = null
     }
     return loaded
+  }
+
+  /**
+   * Undo the flag and the lock THIS call took, when the spawn never landed a process.
+   *
+   * graft's `syncing` flag has exactly one clearer — graft's own sync-run — so a
+   * rebuild that never starts leaves it set forever, and the lock left behind defers
+   * every later rebuild for graft's whole stale-lock window. Nothing here may throw:
+   * a failed spawn must stay a plain 'spawn-failed', not an unhandled rejection.
+   */
+  const clearWedge = (g, root) => {
+    try {
+      g.state.patchStats(root, { syncing: false })
+      if (typeof g.state.releaseLock === 'function') g.state.releaseLock(root)
+    } catch {
+      // graft's own state wins if it disagrees.
+    }
   }
 
   const api = {
@@ -301,9 +323,11 @@ export function createAutoSync(deps = {}) {
           stdio: 'ignore',
           windowsHide: true,
         })
-        child.on?.('error', () => {})
+        // A failed spawn reports itself through this event, asynchronously.
+        child.on?.('error', () => clearWedge(g, root))
         child.unref?.()
       } catch {
+        clearWedge(g, root)
         return 'spawn-failed'
       }
       return 'started'

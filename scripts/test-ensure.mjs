@@ -24,6 +24,10 @@ let failures = 0
 const check = (l, ok, extra = '') => { console.log((ok ? 'PASS  ' : 'FAIL  ') + l + (extra ? '  -> ' + extra : '')); if (!ok) failures += 1 }
 
 const NODE_EXE = process.platform === 'win32' ? 'node.exe' : 'node'
+// Same rule as test-autosync: a PATH entry must be shaped for the host running the
+// suite, or POSIX's ':' delimiter splits a Windows fixture into `C` + `/npm` and the
+// scan finds nothing.
+const envDir = (...seg) => join(process.platform === 'win32' ? 'C:\\' : '/', ...seg)
 const cliIn = (dir) => join(dir, 'node_modules', '@nanonets', 'graft', 'dist', 'cli.js')
 const nodeIn = (dir) => join(dir, NODE_EXE)
 const npmIn = (dir) => join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js')
@@ -56,7 +60,7 @@ const deps = (w, over = {}) => ({ env: w.env, exists: w.exists, spawn: w.spawn, 
 
 console.log('--- nothing to do when graft is already there ---')
 resetEnsureGraftState()
-let w = world({ pathDirs: [join('C:', 'npm')] })
+let w = world({ pathDirs: [envDir('npm')] })
 let r = await ensureGraft(deps(w))
 check('an existing install is reported, not reinstalled', r.ok === true && r.already === true && w.spawns.length === 0, JSON.stringify(r))
 
@@ -71,7 +75,7 @@ for (const over of [{ autoInstall: false }, {}]) {
 
 console.log('--- global install, with a real node and npm-cli.js (no shell) ---')
 resetEnsureGraftState()
-const nodeDir = join('C:', 'node')
+const nodeDir = envDir('node')
 w = world({ nodeDirs: [nodeDir], plan: (cmd, args) => (args.includes('-g') ? { code: 0, add: [cliIn(nodeDir)] } : { code: 1 }) })
 w.env.PATH = nodeDir
 r = await ensureGraft(deps(w))
@@ -110,7 +114,7 @@ check('and npm ran once per target, not once per caller', w.spawns.length === 2,
 
 console.log('--- resolution order and interpreter choice ---')
 resetEnsureGraftState()
-const own = join('C:', 'own')
+const own = envDir('own')
 w = world({ pathDirs: [own], nodeDirs: [nodeDir], managed: true })
 check('the user\'s own PATH install wins over the managed one', resolveGraftCommand(w.env, w.exists).prefix[0] === cliIn(own))
 w = world({ nodeDirs: [nodeDir], managed: true })

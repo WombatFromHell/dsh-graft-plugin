@@ -37,3 +37,6 @@ MARKETPLACE.md
 .claude/
 CLAUDE.local.md
 memory/
+
+# Scratch for scripts/verify-wedge.mjs
+wedge-scratch/

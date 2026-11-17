@@ -71,6 +71,9 @@ export const inject = ['tools']
  */
 const CACHE_MS = 5000
 
+/** graft's own rebuild lock (`graft/.cache/.sync.lock`) — the only honest "a build is in flight". */
+const SYNC_LOCK = '.sync.lock'
+
 const readUtf8 = async (path) => {
   try {
     return await readFile(path, 'utf8')
@@ -320,13 +323,25 @@ export function createToolPulse() {
  * dirty/stale state; the graph is the fallback that keeps a freshly built repo
  * from reading as "not built" until something writes the cache. That ordering
  * is graft's own, kept identical so this chip and graft's statusline cannot
- * disagree about the same repo.
+ * disagree about the same repo — with one exception, spelled below: a `syncing`
+ * flag its builder no longer holds is reconciled here, because showing a sync that
+ * is not happening would be a lie in both places.
  */
 export async function computeStatus(root, io) {
   const worktreeOf = await linkedWorktreeMain(root, io.readText ?? readUtf8)
   const stats = await io.readJson(join(root, 'graft', '.cache', 'stats.json'))
+  // graft's `syncing` flag has ONE clearer — graft's own sync-run — and it does not
+  // survive a rebuild that dies mid-flight (`finally` never runs), nor a lost
+  // read-modify-write in patchStats. graft's query-time refresh rebuilds the graph
+  // without touching stats.json at all, so the flag can outlive the sync by hours:
+  // that is the stuck "◐ syncing" chip on a freshly opened workspace. Every sync in
+  // flight holds graft's lock, and both writers take it BEFORE setting the flag, so a
+  // flag with no lock is a leftover. ponytail: a builder that dies holding the lock is
+  // reported as syncing until graft's own 5-minute stale-lock window expires.
+  const syncing =
+    stats?.syncing === true && (await io.exists?.(join(root, 'graft', '.cache', SYNC_LOCK))) === true
   const base = stats !== undefined && typeof stats.nodeCount === 'number' && stats.nodeCount > 0
-    ? { nodeCount: stats.nodeCount, edgeCount: stats.edgeCount ?? 0, freshness: freshnessOf(stats), syncedAt: stats.syncedAt ?? null }
+    ? { nodeCount: stats.nodeCount, edgeCount: stats.edgeCount ?? 0, freshness: freshnessOf({ ...stats, syncing }), syncedAt: stats.syncedAt ?? null }
     : undefined
 
   if (base !== undefined) {
